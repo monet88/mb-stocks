@@ -143,19 +143,12 @@ class TestVNErrorHandling(unittest.TestCase):
     """T13-T16: Error scenarios."""
 
     def test_t13_vnstock_not_installed_no_crash(self):
-        """If vnstock import fails, fetcher is skipped gracefully."""
+        """If vnstock import fails, fetcher constructor raises and manager skips it."""
+        from data_provider.vnstocks_fetcher import VnstocksFetcher
+
         with patch.dict(sys.modules, {"vnstock": None}):
-            try:
-                # Simulate what _init_default_fetchers does
-                try:
-                    from data_provider.vnstocks_fetcher import VnstocksFetcher
-                    fetcher = VnstocksFetcher()
-                except (ImportError, TypeError):
-                    fetcher = None
-                # Should not crash — fetcher is None
-                self.assertTrue(fetcher is None or fetcher is not None)
-            except Exception:
-                self.fail("vnstock import failure should not crash the app")
+            with self.assertRaises((ImportError, ModuleNotFoundError)):
+                VnstocksFetcher()
 
     def test_t14_normalize_missing_columns(self):
         """_normalize_data raises DataFetchError when columns are missing."""

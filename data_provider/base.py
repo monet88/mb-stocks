@@ -787,9 +787,9 @@ class DataFetcherManager:
         try:
             from .vnstocks_fetcher import VnstocksFetcher
             vnstocks = VnstocksFetcher()
-        except ImportError:
+        except Exception as e:
             vnstocks = None
-            logger.warning("vnstock not installed, skipping VnstocksFetcher")
+            logger.warning(f"VnstocksFetcher unavailable, skipping: {e}")
 
         # 初始化数据源列表
         self._fetchers = [

@@ -33,6 +33,9 @@ class VnstocksFetcher(BaseFetcher):
     supported_markets = {'vn'}
 
     def __init__(self):
+        # Fail fast if vnstock is not installed
+        import vnstock  # noqa: F401
+
         api_key = os.getenv("VNSTOCK_API_KEY", "").strip()
         if api_key:
             try:
