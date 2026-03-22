@@ -367,5 +367,127 @@ class TestTradingCalendarVN(unittest.TestCase):
         self.assertEqual(get_market_for_stock("VN:FPT"), "vn")
 
 
+# ─── T25-T28: Integration tests (DataFrame→Quote mapping) ───
+
+
+class TestIntradayQuoteMapping(unittest.TestCase):
+    """Test _fetch_intraday_quote with real DataFrame, mock at vnstock.Quote level."""
+
+    def setUp(self):
+        from data_provider.vnstocks_fetcher import VnstocksFetcher
+        import time as _time
+        VnstocksFetcher._vn_name_cache = {"FPT": "FPT Corporation"}
+        VnstocksFetcher._vn_name_cache_ts = _time.time()
+
+    @patch("vnstock.Quote")
+    @patch("data_provider.vnstocks_fetcher.VnstocksFetcher._get_previous_close", return_value=118.0)
+    def test_t25_intraday_dataframe_to_quote(self, mock_prev, mock_quote_cls):
+        """Full intraday pipeline: DataFrame → safe_float → change_pct → UnifiedRealtimeQuote."""
+        mock_api = MagicMock()
+        mock_quote_cls.return_value = mock_api
+        mock_api.intraday.return_value = pd.DataFrame({
+            'time': ['09:15:00'],
+            'price': [120.5],
+            'volume': [5000],
+            'match_type': ['ATO'],
+            'id': [1],
+        })
+
+        fetcher = _make_fetcher()
+        result = fetcher._fetch_intraday_quote("FPT")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.price, 120.5)
+        self.assertEqual(result.pre_close, 118.0)
+        self.assertAlmostEqual(result.change_pct, round((120.5 - 118.0) / 118.0 * 100, 2))
+        self.assertEqual(result.change_amount, round(120.5 - 118.0, 2))
+        self.assertEqual(result.volume, 5000)
+        self.assertEqual(result.name, "FPT Corporation")
+        self.assertEqual(result.source, RealtimeSource.VNSTOCK)
+
+
+class TestFallbackQuoteMapping(unittest.TestCase):
+    """Test _fetch_fallback_quote with real DataFrame, mock at vnstock.Quote level."""
+
+    def setUp(self):
+        from data_provider.vnstocks_fetcher import VnstocksFetcher
+        import time as _time
+        VnstocksFetcher._vn_name_cache = {"FPT": "FPT Corporation"}
+        VnstocksFetcher._vn_name_cache_ts = _time.time()
+
+    @patch("vnstock.Quote")
+    def test_t26_fallback_dataframe_to_quote_with_ohlc(self, mock_quote_cls):
+        """Full fallback pipeline: 2-day history → OHLC + change_pct → UnifiedRealtimeQuote."""
+        mock_api = MagicMock()
+        mock_quote_cls.return_value = mock_api
+        mock_api.history.return_value = pd.DataFrame({
+            'time': ['2026-03-20', '2026-03-21'],
+            'open': [115.0, 117.0],
+            'high': [116.0, 119.5],
+            'low': [114.5, 116.5],
+            'close': [115.5, 118.7],
+            'volume': [100000, 120000],
+        })
+
+        fetcher = _make_fetcher()
+        result = fetcher._fetch_fallback_quote("FPT")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.price, 118.7)
+        self.assertEqual(result.pre_close, 115.5)
+        self.assertAlmostEqual(result.change_pct, round((118.7 - 115.5) / 115.5 * 100, 2))
+        self.assertEqual(result.open_price, 117.0)
+        self.assertEqual(result.high, 119.5)
+        self.assertEqual(result.low, 116.5)
+        self.assertEqual(result.volume, 120000)
+
+    @patch("vnstock.Quote")
+    def test_t27_fallback_single_day_no_preclose(self, mock_quote_cls):
+        """Fallback with only 1 day of data: pre_close is None, no change_pct."""
+        mock_api = MagicMock()
+        mock_quote_cls.return_value = mock_api
+        mock_api.history.return_value = pd.DataFrame({
+            'time': ['2026-03-21'],
+            'open': [117.0],
+            'high': [119.5],
+            'low': [116.5],
+            'close': [118.7],
+            'volume': [120000],
+        })
+
+        fetcher = _make_fetcher()
+        result = fetcher._fetch_fallback_quote("FPT")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.price, 118.7)
+        self.assertIsNone(result.pre_close)
+        self.assertIsNone(result.change_pct)
+        self.assertIsNone(result.change_amount)
+
+
+class TestPreviousCloseDefense(unittest.TestCase):
+    """Test _get_previous_close partial-day defense (Issue 1 fix)."""
+
+    @patch("vnstock.Quote")
+    def test_t28_previous_close_skips_today_partial(self, mock_quote_cls):
+        """If last history row is today, use the row before it."""
+        from data_provider.vnstocks_fetcher import VnstocksFetcher
+        from datetime import datetime as real_dt
+
+        mock_api = MagicMock()
+        mock_quote_cls.return_value = mock_api
+        today_str = real_dt.now().strftime('%Y-%m-%d')
+        mock_api.history.return_value = pd.DataFrame({
+            'time': ['2026-03-20', today_str],
+            'close': [115.5, 118.0],
+        })
+
+        fetcher = _make_fetcher()
+        result = fetcher._get_previous_close("FPT", "VCI")
+
+        # Should return 115.5 (yesterday), not 118.0 (today's partial)
+        self.assertEqual(result, 115.5)
+
+
 if __name__ == "__main__":
     unittest.main()

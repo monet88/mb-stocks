@@ -242,6 +242,12 @@ class VnstocksFetcher(BaseFetcher):
             start = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
             df = quote_api.history(start=start, end=end, interval='1D')
             if df is not None and len(df) >= 1:
+                # If last row is today (partial candle during trading hours),
+                # use the row before it as previous close
+                last_date = str(df.iloc[-1].get('time', ''))[:10]
+                today = datetime.now().strftime('%Y-%m-%d')
+                if last_date == today and len(df) >= 2:
+                    return safe_float(df.iloc[-2].get('close'))
                 return safe_float(df.iloc[-1].get('close'))
         except Exception as e:
             logger.debug(f"[VnstocksFetcher] previous close failed for {stock_code}: {e}")
@@ -303,7 +309,7 @@ class VnstocksFetcher(BaseFetcher):
         VN trading sessions (GMT+7 / Asia/Ho_Chi_Minh):
         - Session 1: 09:00 - 11:30
         - Session 2: 13:00 - 15:00
-        Weekdays only (Mon-Fri). Fail-open on timezone errors.
+        Weekdays only (Mon-Fri). Fail-closed on timezone errors (uses daily fallback).
         """
         try:
             from zoneinfo import ZoneInfo
