@@ -1136,7 +1136,26 @@ class DataFetcherManager:
 
             logger.warning(f"[实时行情] 港股 {stock_code} 无可用数据源")
             return None
-        
+
+        # VN stocks: route to VnstocksFetcher
+        if _is_vn_market(stock_code):
+            vn_symbol = stock_code.split(':')[1]  # Strip VN: prefix
+            for fetcher in self._fetchers:
+                if 'vn' not in getattr(fetcher, 'supported_markets', set()):
+                    continue
+                if not hasattr(fetcher, 'get_realtime_quote'):
+                    break
+                try:
+                    quote = fetcher.get_realtime_quote(vn_symbol)
+                    if quote is not None and quote.has_basic_data():
+                        logger.info(f"[实时行情] VN {stock_code} 成功获取 (来源: {fetcher.name})")
+                        return quote
+                except Exception as e:
+                    logger.warning(f"[实时行情] VN {stock_code} 获取失败: {e}")
+                break
+            logger.warning(f"[实时行情] VN {stock_code} 无可用数据源")
+            return None
+
         # 获取配置的数据源优先级
         source_priority = config.realtime_source_priority.split(',')
         

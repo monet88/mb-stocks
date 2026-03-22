@@ -49,7 +49,7 @@ mb-stocks/
 │   │   ├── market_profile.py  # Market profile builder
 │   │   ├── config_manager.py  # Runtime config manager
 │   │   ├── config_registry.py # Config registry
-│   │   ├── trading_calendar.py# Exchange calendar (CN/HK/US)
+│   │   ├── trading_calendar.py# Exchange calendar (CN/HK/US/VN)
 │   │   └── backtest_engine.py # Backtest evaluation engine
 │   │
 │   ├── services/              # Business service layer (19 files)

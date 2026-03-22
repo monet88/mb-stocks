@@ -25,12 +25,13 @@ The system is a mature, feature-rich stock analysis platform with:
 ## Near-term (Next Release)
 
 ### Vietnamese Stock Market Integration
-**Status:** Plan validated, implementation pending
-- VN prefix convention (`VNFPT`, `VNACB`) for symbol routing
-- `vnstock` library integration (v3.4.0+)
+**Status:** Shipped (V1: PR #1, V2: PR #2)
+- V1: Daily historical data via `VnstocksFetcher` (`VN:FPT` prefix convention)
+- V2: Hybrid realtime quotes (intraday during trading hours, daily close fallback)
+- V2: Dynamic stock names via `Listing().all_symbols()` with 24h TTL cache
+- V2: VN trading calendar support (weekday-only, `Asia/Ho_Chi_Minh`)
 - API key management via `VNSTOCK_API_KEY` env var
-- Data normalization to STANDARD_COLUMNS
-- Reference: `plans/260321-2350-vnstocks-integration/plan.md`
+- 44 tests (16 V1 + 28 V2)
 
 ### Technical Debt
 - **Config consolidation** — `src/config.py` at 2150 lines; consider splitting into domain-specific config modules

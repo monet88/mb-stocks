@@ -12,10 +12,20 @@ Convention: Use VN: prefix (e.g. VN:FPT, VN:ACB, VN:VCB)
 
 import logging
 import os
+import time
+from datetime import datetime
+from typing import Optional
 
 import pandas as pd
 
 from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS
+from .realtime_types import (
+    UnifiedRealtimeQuote,
+    RealtimeSource,
+    safe_float,
+    safe_int,
+    get_realtime_circuit_breaker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +41,10 @@ class VnstocksFetcher(BaseFetcher):
     name = "VnstocksFetcher"
     priority = int(os.getenv("VNSTOCK_PRIORITY", "3"))
     supported_markets = {'vn'}
+
+    # Stock name cache (class-level, shared across instances)
+    _vn_name_cache: dict = {}
+    _vn_name_cache_ts: float = 0
 
     def __init__(self):
         # Fail fast if vnstock is not installed
@@ -89,3 +103,225 @@ class VnstocksFetcher(BaseFetcher):
         existing_cols = [col for col in keep_cols if col in df.columns]
         df = df[existing_cols]
         return df
+
+    # ──────────────────────────────────────────────
+    # Realtime Quote (V2)
+    # ──────────────────────────────────────────────
+
+    def get_realtime_quote(self, stock_code: str, source: str = "") -> Optional[UnifiedRealtimeQuote]:
+        """
+        Hybrid realtime quote for VN stocks.
+
+        During VN trading hours: fetch latest tick via quote.intraday()
+        + previous close via quote.history() for change_pct computation.
+        Outside trading hours: fallback to last daily close.
+
+        Args:
+            stock_code: VN stock symbol WITHOUT VN: prefix (e.g. 'FPT')
+            source: ignored, kept for interface compatibility
+        """
+        circuit_breaker = get_realtime_circuit_breaker()
+        cb_key = f"vnstock_{stock_code}"
+
+        if not circuit_breaker.is_available(cb_key):
+            logger.debug(f"[VnstocksFetcher] circuit breaker open for {stock_code}")
+            return None
+
+        try:
+            if self._is_vn_trading_hours():
+                quote = self._fetch_intraday_quote(stock_code)
+            else:
+                quote = self._fetch_fallback_quote(stock_code)
+
+            if quote is not None:
+                circuit_breaker.record_success(cb_key)
+            return quote
+        except Exception as e:
+            logger.warning(f"[VnstocksFetcher] realtime quote failed for {stock_code}: {e}")
+            circuit_breaker.record_failure(cb_key, str(e))
+            return None
+
+    def _fetch_intraday_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+        """Fetch latest tick from intraday API + previous close for change_pct."""
+        from vnstock import Quote
+
+        vn_source = os.getenv("VNSTOCK_SOURCE", "VCI")
+        quote_api = Quote(symbol=stock_code, source=vn_source)
+
+        # Get latest intraday tick
+        df_intraday = quote_api.intraday(symbol=stock_code)
+        if df_intraday is None or df_intraday.empty:
+            logger.warning(f"[VnstocksFetcher] intraday empty for {stock_code}, falling back to daily")
+            return self._fetch_fallback_quote(stock_code)
+
+        latest = df_intraday.iloc[-1]
+        price = safe_float(latest.get('price'))
+        if price is None:
+            return self._fetch_fallback_quote(stock_code)
+
+        volume = safe_int(latest.get('volume'))
+
+        # Get previous close from daily history for change_pct
+        pre_close = self._get_previous_close(stock_code, vn_source)
+        change_pct = None
+        change_amount = None
+        if pre_close and pre_close > 0:
+            change_amount = round(price - pre_close, 2)
+            change_pct = round((price - pre_close) / pre_close * 100, 2)
+
+        name = self.get_stock_name(stock_code)
+
+        return UnifiedRealtimeQuote(
+            code=stock_code,
+            name=name,
+            source=RealtimeSource.VNSTOCK,
+            price=price,
+            change_pct=change_pct,
+            change_amount=change_amount,
+            volume=volume,
+            pre_close=pre_close,
+        )
+
+    def _fetch_fallback_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+        """Fallback: use last daily close as realtime quote."""
+        from vnstock import Quote
+
+        vn_source = os.getenv("VNSTOCK_SOURCE", "VCI")
+        quote_api = Quote(symbol=stock_code, source=vn_source)
+
+        end = datetime.now().strftime('%Y-%m-%d')
+        # Fetch last 10 days to ensure we get at least 2 trading days
+        from datetime import timedelta
+        start = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
+
+        df = quote_api.history(start=start, end=end, interval='1D')
+        if df is None or df.empty:
+            return None
+
+        latest = df.iloc[-1]
+        price = safe_float(latest.get('close'))
+        if price is None:
+            return None
+
+        pre_close = safe_float(df.iloc[-2].get('close')) if len(df) >= 2 else None
+        change_pct = None
+        change_amount = None
+        if pre_close and pre_close > 0:
+            change_amount = round(price - pre_close, 2)
+            change_pct = round((price - pre_close) / pre_close * 100, 2)
+
+        open_price = safe_float(latest.get('open'))
+        high = safe_float(latest.get('high'))
+        low = safe_float(latest.get('low'))
+        volume = safe_int(latest.get('volume'))
+
+        name = self.get_stock_name(stock_code)
+
+        return UnifiedRealtimeQuote(
+            code=stock_code,
+            name=name,
+            source=RealtimeSource.VNSTOCK,
+            price=price,
+            change_pct=change_pct,
+            change_amount=change_amount,
+            volume=volume,
+            pre_close=pre_close,
+            open_price=open_price,
+            high=high,
+            low=low,
+        )
+
+    def _get_previous_close(self, stock_code: str, vn_source: str) -> Optional[float]:
+        """Get previous trading day close price."""
+        try:
+            from vnstock import Quote
+            from datetime import timedelta
+
+            quote_api = Quote(symbol=stock_code, source=vn_source)
+            end = datetime.now().strftime('%Y-%m-%d')
+            start = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
+            df = quote_api.history(start=start, end=end, interval='1D')
+            if df is not None and len(df) >= 1:
+                # If last row is today (partial candle during trading hours),
+                # use the row before it as previous close
+                last_date = str(df.iloc[-1].get('time', ''))[:10]
+                today = datetime.now().strftime('%Y-%m-%d')
+                if last_date == today and len(df) >= 2:
+                    return safe_float(df.iloc[-2].get('close'))
+                return safe_float(df.iloc[-1].get('close'))
+        except Exception as e:
+            logger.debug(f"[VnstocksFetcher] previous close failed for {stock_code}: {e}")
+        return None
+
+    # ──────────────────────────────────────────────
+    # Stock Name (V2)
+    # ──────────────────────────────────────────────
+
+    def get_stock_name(self, stock_code: str) -> str:
+        """
+        Fetch VN stock name from vnstock listing API with 24h TTL cache.
+
+        Args:
+            stock_code: VN stock symbol WITHOUT VN: prefix (e.g. 'FPT')
+
+        Returns:
+            Company name (e.g. 'FPT Corporation') or empty string
+        """
+        # Check cache freshness (24h TTL)
+        if (time.time() - VnstocksFetcher._vn_name_cache_ts < 86400
+                and VnstocksFetcher._vn_name_cache):
+            return VnstocksFetcher._vn_name_cache.get(stock_code.upper(), "")
+
+        try:
+            self._refresh_name_cache()
+        except Exception as e:
+            logger.warning(f"[VnstocksFetcher] name cache refresh failed: {e}")
+            # Return from stale cache if available
+            return VnstocksFetcher._vn_name_cache.get(stock_code.upper(), "")
+
+        return VnstocksFetcher._vn_name_cache.get(stock_code.upper(), "")
+
+    def _refresh_name_cache(self):
+        """Refresh the stock name cache from vnstock listing API."""
+        from vnstock import Listing
+
+        listing = Listing()
+        df = listing.all_symbols()
+        if df is not None and not df.empty:
+            # Columns: ['symbol', 'organ_name', ...] per eng review V2
+            VnstocksFetcher._vn_name_cache = dict(
+                zip(df['symbol'].str.upper(), df['organ_name'])
+            )
+            VnstocksFetcher._vn_name_cache_ts = time.time()
+            logger.info(
+                f"[VnstocksFetcher] name cache refreshed: {len(VnstocksFetcher._vn_name_cache)} symbols"
+            )
+
+    # ──────────────────────────────────────────────
+    # VN Trading Hours
+    # ──────────────────────────────────────────────
+
+    @staticmethod
+    def _is_vn_trading_hours() -> bool:
+        """
+        Check if current time is within VN trading hours.
+
+        VN trading sessions (GMT+7 / Asia/Ho_Chi_Minh):
+        - Session 1: 09:00 - 11:30
+        - Session 2: 13:00 - 15:00
+        Weekdays only (Mon-Fri). Fail-closed on timezone errors (uses daily fallback).
+        """
+        try:
+            from zoneinfo import ZoneInfo
+
+            now = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
+            # Weekend check
+            if now.weekday() >= 5:
+                return False
+            t = now.hour * 60 + now.minute  # minutes since midnight
+            session_1 = (9 * 60) <= t < (11 * 60 + 30)   # 09:00 - 11:30
+            session_2 = (13 * 60) <= t < (15 * 60)         # 13:00 - 15:00
+            return session_1 or session_2
+        except Exception as e:
+            logger.warning(f"[VnstocksFetcher] trading hours check failed: {e}")
+            return False  # Fail-closed: use fallback (daily close) on error
