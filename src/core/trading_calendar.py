@@ -30,6 +30,7 @@ except ImportError:
     )
 
 # Market -> exchange code (exchange-calendars)
+# Note: VN (XHOSE) is NOT supported by exchange_calendars; use manual check.
 MARKET_EXCHANGE = {"cn": "XSHG", "hk": "XHKG", "us": "XNYS"}
 
 # Market -> IANA timezone for "today"
@@ -37,6 +38,7 @@ MARKET_TIMEZONE = {
     "cn": "Asia/Shanghai",
     "hk": "Asia/Hong_Kong",
     "us": "America/New_York",
+    "vn": "Asia/Ho_Chi_Minh",
 }
 
 
@@ -53,6 +55,9 @@ def get_market_for_stock(code: str) -> Optional[str]:
 
     from data_provider import is_us_stock_code, is_us_index_code, is_hk_stock_code
 
+    # VN stocks use VN: prefix convention
+    if code.startswith("VN:") and len(code) > 3:
+        return "vn"
     if is_us_stock_code(code) or is_us_index_code(code):
         return "us"
     if is_hk_stock_code(code):
@@ -76,8 +81,11 @@ def is_market_open(market: str, check_date: date) -> bool:
     Returns:
         True if trading day (or fail-open), False otherwise
     """
-    if not _XCALS_AVAILABLE:
+    if not _XCALS_AVAILABLE and market != "vn":
         return True
+    # VN: weekday-only check (exchange_calendars does not support XHOSE)
+    if market == "vn":
+        return check_date.weekday() < 5  # Mon-Fri
     ex = MARKET_EXCHANGE.get(market)
     if not ex:
         return True
@@ -98,7 +106,7 @@ def get_open_markets_today() -> Set[str]:
         Set of market keys ('cn', 'hk', 'us') that are trading today
     """
     if not _XCALS_AVAILABLE:
-        return {"cn", "hk", "us"}
+        return {"cn", "hk", "us", "vn"}
     result: Set[str] = set()
     from zoneinfo import ZoneInfo
     for mkt, tz_name in MARKET_TIMEZONE.items():
