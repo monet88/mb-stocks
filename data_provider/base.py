@@ -85,6 +85,12 @@ def normalize_stock_code(stock_code: str) -> str:
     code = stock_code.strip()
     upper = code.upper()
 
+    # VN stocks: VN:FPT -> VN:FPT, vn:fpt -> VN:FPT
+    if upper.startswith('VN:'):
+        candidate = upper[3:]  # Strip "VN:"
+        if candidate and candidate.isalpha() and 1 <= len(candidate) <= 5:
+            return f"VN:{candidate}"
+
     # Normalize HK prefix to a canonical 5-digit form (e.g. hk1810 -> HK01810)
     if upper.startswith('HK') and not upper.startswith('HK.'):
         candidate = upper[2:]
@@ -116,6 +122,15 @@ def normalize_stock_code(stock_code: str) -> str:
 
 
 ETF_PREFIXES = ("51", "52", "56", "58", "15", "16", "18")
+
+
+def _is_vn_market(code: str) -> bool:
+    """Detect VN market codes using VN: prefix convention (e.g. VN:FPT)."""
+    normalized = (code or "").strip().upper()
+    if not normalized.startswith("VN:"):
+        return False
+    symbol = normalized[3:]
+    return bool(symbol) and symbol.isalpha() and 1 <= len(symbol) <= 5
 
 
 def _is_us_market(code: str) -> bool:
@@ -155,7 +170,9 @@ def _is_etf_code(code: str) -> bool:
 
 
 def _market_tag(code: str) -> str:
-    """返回市场标签: cn/us/hk."""
+    """返回市场标签: cn/us/hk/vn."""
+    if _is_vn_market(code):
+        return "vn"
     if _is_us_market(code):
         return "us"
     if _is_hk_market(code):
@@ -766,6 +783,14 @@ class DataFetcherManager:
         baostock = BaostockFetcher()
         yfinance = YfinanceFetcher()
 
+        # VN market data source (optional — vnstock may not be installed)
+        try:
+            from .vnstocks_fetcher import VnstocksFetcher
+            vnstocks = VnstocksFetcher()
+        except (ImportError, ValueError) as e:
+            vnstocks = None
+            logger.warning(f"VnstocksFetcher unavailable, skipping: {e}")
+
         # 初始化数据源列表
         self._fetchers = [
             efinance,
@@ -775,6 +800,8 @@ class DataFetcherManager:
             baostock,
             yfinance,
         ]
+        if vnstocks is not None:
+            self._fetchers.append(vnstocks)
 
         # 按优先级排序（Tushare 如果配置了 Token 且初始化成功，优先级为 0）
         self._fetchers.sort(key=lambda f: f.priority)
@@ -825,6 +852,45 @@ class DataFetcherManager:
         errors = []
         total_fetchers = len(self._fetchers)
         request_start = time.time()
+
+        # VN market: route to fetchers with supported_markets containing 'vn'
+        if _is_vn_market(stock_code):
+            vn_symbol = stock_code.split(':')[1]  # Strip VN: prefix
+            vn_fetchers = [
+                f for f in self._fetchers
+                if 'vn' in getattr(f, 'supported_markets', set())
+            ]
+            for attempt, fetcher in enumerate(vn_fetchers, start=1):
+                try:
+                    logger.info(
+                        f"[数据源尝试 {attempt}/{len(vn_fetchers)}] [{fetcher.name}] "
+                        f"VN市场 {vn_symbol} 路由..."
+                    )
+                    df = fetcher.get_daily_data(
+                        stock_code=vn_symbol,
+                        start_date=start_date,
+                        end_date=end_date,
+                        days=days,
+                    )
+                    if df is not None and not df.empty:
+                        elapsed = time.time() - request_start
+                        logger.info(
+                            f"[数据源完成] VN:{vn_symbol} 使用 [{fetcher.name}] 获取成功: "
+                            f"rows={len(df)}, elapsed={elapsed:.2f}s"
+                        )
+                        return df, fetcher.name
+                except Exception as e:
+                    error_type, error_reason = summarize_exception(e)
+                    error_msg = f"[{fetcher.name}] ({error_type}) {error_reason}"
+                    logger.warning(
+                        f"[数据源失败 {attempt}/{len(vn_fetchers)}] [{fetcher.name}] "
+                        f"VN:{vn_symbol}: error_type={error_type}, reason={error_reason}"
+                    )
+                    errors.append(error_msg)
+            error_summary = f"VN市场 {vn_symbol} 获取失败:\n" + "\n".join(errors)
+            elapsed = time.time() - request_start
+            logger.error(f"[数据源终止] VN:{vn_symbol} 获取失败: elapsed={elapsed:.2f}s\n{error_summary}")
+            raise DataFetchError(error_summary)
 
         # 快速路径：美股指数与美股股票直接路由到 YfinanceFetcher
         if is_us_index_code(stock_code) or is_us_stock_code(stock_code):
@@ -1773,7 +1839,7 @@ class DataFetcherManager:
         stock_code = normalize_stock_code(stock_code)
         market = _market_tag(stock_code)
         is_etf = _is_etf_code(stock_code)
-        if market in {"us", "hk"}:
+        if market in {"us", "hk", "vn"}:
             return self._build_market_not_supported(
                 market=market,
                 reason="market not supported",
