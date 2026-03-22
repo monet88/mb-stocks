@@ -66,7 +66,7 @@ The system operates in three modes:
 - [x] Report integrity validation + retry
 - [x] Multi-channel LLM config (LITELLM_CONFIG YAML)
 - [x] Markdown-to-image for non-MD channels
-- [ ] Vietnamese stock market integration (VN prefix convention, vnstock library)
+- [x] Vietnamese stock market integration (VN: prefix, vnstock library, realtime + names)
 
 ### P2 — Nice to Have (planned)
 - [ ] Strategy marketplace / community-contributed YAML strategies
