@@ -106,7 +106,17 @@ def get_open_markets_today() -> Set[str]:
         Set of market keys ('cn', 'hk', 'us') that are trading today
     """
     if not _XCALS_AVAILABLE:
-        return {"cn", "hk", "us", "vn"}
+        # CN/HK/US need exchange_calendars — fail open
+        # VN uses manual weekday check — apply it even without exchange_calendars
+        from zoneinfo import ZoneInfo
+        result = {"cn", "hk", "us"}
+        try:
+            vn_today = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).date()
+            if is_market_open("vn", vn_today):
+                result.add("vn")
+        except Exception:
+            result.add("vn")  # fail-open
+        return result
     result: Set[str] = set()
     from zoneinfo import ZoneInfo
     for mkt, tz_name in MARKET_TIMEZONE.items():
